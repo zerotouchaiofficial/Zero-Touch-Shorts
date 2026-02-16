@@ -2,7 +2,6 @@ name: 🎬 Daily YouTube Shorts Generator
 
 on:
   schedule:
-    # 10 videos per day — every 2.5 hours starting midnight UTC
     - cron: '0 0  * * *'
     - cron: '0 2  * * *'
     - cron: '0 4  * * *'
@@ -13,117 +12,112 @@ on:
     - cron: '0 14 * * *'
     - cron: '0 16 * * *'
     - cron: '0 18 * * *'
-  workflow_dispatch:   # ← lets you trigger manually from GitHub UI too
+  workflow_dispatch:
 
 jobs:
   generate-and-upload:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    permissions:
+      contents: write
+
     steps:
 
-    # ── 1. Checkout repo ─────────────────────────────────────────
     - name: 📥 Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
 
-    # ── 2. Python setup ──────────────────────────────────────────
     - name: 🐍 Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
 
-    # ── 3. System dependencies ───────────────────────────────────
     - name: 📦 Install system packages
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq \
           imagemagick ffmpeg \
-          fonts-dejavu-core fonts-liberation \
+          fonts-dejavu-core \
+          fonts-liberation \
           python3-dev
-        # Fix ImageMagick policy
         sudo mv /etc/ImageMagick-6/policy.xml \
                 /etc/ImageMagick-6/policy.xml.bak || true
 
-    # ── 4. Python dependencies ───────────────────────────────────
     - name: 🐍 Install Python packages
       run: pip install -r requirements.txt
 
-    # ── 5. Generate video number (based on time) ─────────────────
     - name: 🔢 Set video number
       id: vidnum
       run: |
-        # Unique number from date + hour so parallel runs don't clash
         VID_NUM=$(date +'%Y%m%d%H')
         echo "video_number=$VID_NUM" >> $GITHUB_OUTPUT
         echo "Video number: $VID_NUM"
 
-    # ── 6. Generate Short + Thumbnail ────────────────────────────
-    - name: 🎬 Generate YouTube Short
+    - name: 🎬 Generate Short + Thumbnail
       env:
         UNSPLASH_KEY: ${{ secrets.UNSPLASH_KEY }}
       run: |
-        python -c "
-        import sys
+        python - <<'PYEOF'
+        import sys, json
         sys.path.insert(0, '.')
         from scripts.generate_short import generate
-        vid, thumb, facts = generate(${{ steps.vidnum.outputs.video_number }})
-        print(f'VIDEO={vid}')
-        print(f'THUMB={thumb}')
-        with open('output_paths.txt','w') as f:
-            f.write(vid + '\n')
-            f.write(thumb + '\n')
-        "
 
-    # ── 7. Upload to YouTube ─────────────────────────────────────
+        vid, thumb, facts = generate(${{ steps.vidnum.outputs.video_number }})
+
+        with open('output_paths.txt', 'w') as f:
+            f.write(vid   + '\n')
+            f.write((thumb or '') + '\n')
+
+        print(f'VIDEO : {vid}')
+        print(f'THUMB : {thumb}')
+        print(f'FACTS : {len(facts)}')
+        PYEOF
+
     - name: 📤 Upload to YouTube
       env:
         YT_CLIENT_ID:     ${{ secrets.YT_CLIENT_ID }}
         YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
         YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
       run: |
-        python -c "
-        import sys, os
+        python - <<'PYEOF'
+        import sys, os, json
         sys.path.insert(0, '.')
 
         with open('output_paths.txt') as f:
-            lines = f.read().strip().split('\n')
+            lines      = f.read().strip().split('\n')
         vid_path   = lines[0]
-        thumb_path = lines[1]
+        thumb_path = lines[1] if len(lines) > 1 and lines[1] else None
 
-        from scripts.generate_short import generate
-        # Re-load facts from the already-generated audio folder
-        import glob, json
-        # Load facts from already-generated run
-        facts_file = vid_path.replace('/short.mp4','/facts.json')
-        if os.path.exists(facts_file):
-            import json
-            facts = json.load(open(facts_file))
-        else:
-            facts = ['Amazing facts about the world']
+        facts_file = vid_path.replace('/short.mp4', '/facts.json')
+        with open(facts_file) as f:
+            facts = json.load(f)
 
         from scripts.upload_youtube import upload_video
+
         vid_id, url = upload_video(
-            vid_path, facts,
-            int('${{ steps.vidnum.outputs.video_number }}')
+            video_path   = vid_path,
+            facts        = facts,
+            video_number = int('${{ steps.vidnum.outputs.video_number }}'),
+            thumb_path   = thumb_path,
         )
         print(f'✅ Uploaded: {url}')
-        print(f'video_id={vid_id}')
-        print(f'url={url}')
-        " 2>&1
+        PYEOF
 
-    # ── 8. Cleanup to save disk space ────────────────────────────
-    - name: 🧹 Cleanup generated files
+    - name: 💾 Commit used_facts.json back to repo
+      if: always()
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add used_facts.json || true
+        git diff --cached --quiet || \
+          git commit -m "🤖 Update used_facts.json [skip ci]"
+        git push || true
+
+    - name: 🧹 Cleanup
       if: always()
       run: |
         rm -rf output/ _audio/ _images/ || true
         echo "✅ Cleaned up"
-
-    # ── 9. Upload logs as artifact (for debugging) ───────────────
-    - name: 📋 Save run log
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: run-log-${{ steps.vidnum.outputs.video_number }}
-        path: output_paths.txt
-        retention-days: 7
