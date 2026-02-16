@@ -1,17 +1,28 @@
-name: 🎬 Daily YouTube Shorts Generator
+name: 🎬 Daily YouTube Shorts — Growth Optimised
 
 on:
   schedule:
-    - cron: '0 0  * * *'
-    - cron: '0 2  * * *'
-    - cron: '0 4  * * *'
-    - cron: '0 6  * * *'
-    - cron: '0 8  * * *'
-    - cron: '0 10 * * *'
-    - cron: '0 12 * * *'
-    - cron: '0 14 * * *'
-    - cron: '0 16 * * *'
+    # ── 10 uploads/day at PEAK YouTube times (EST = UTC-5) ────────
+    # 12:00 PM EST = 17:00 UTC  ← lunch peak
+    - cron: '0 17 * * *'
+    # 1:00 PM EST = 18:00 UTC
     - cron: '0 18 * * *'
+    # 3:00 PM EST = 20:00 UTC  ← afternoon peak
+    - cron: '0 20 * * *'
+    # 5:00 PM EST = 22:00 UTC
+    - cron: '0 22 * * *'
+    # 6:00 PM EST = 23:00 UTC  ← commute peak
+    - cron: '0 23 * * *'
+    # 7:00 PM EST = 00:00 UTC
+    - cron: '0 0 * * *'
+    # 8:00 PM EST = 01:00 UTC  ← prime time peak
+    - cron: '0 1 * * *'
+    # 9:00 PM EST = 02:00 UTC
+    - cron: '0 2 * * *'
+    # 10:00 PM EST = 03:00 UTC ← late night
+    - cron: '0 3 * * *'
+    # 11:00 PM EST = 04:00 UTC
+    - cron: '0 4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -24,18 +35,18 @@ jobs:
 
     steps:
 
-    - name: 📥 Checkout repository
+    - name: 📥 Checkout
       uses: actions/checkout@v4
       with:
         fetch-depth: 1
 
-    - name: 🐍 Set up Python 3.11
+    - name: 🐍 Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
 
-    - name: 📦 Install system packages
+    - name: 📦 System packages
       run: |
         sudo apt-get update -qq
         sudo apt-get install -y -qq \
@@ -46,15 +57,15 @@ jobs:
         sudo mv /etc/ImageMagick-6/policy.xml \
                 /etc/ImageMagick-6/policy.xml.bak || true
 
-    - name: 🐍 Install Python packages
+    - name: 🐍 Python packages
       run: pip install -r requirements.txt
 
-    - name: 🔢 Set video number
+    - name: 🔢 Video number
       id: vidnum
       run: |
         VID_NUM=$(date +'%Y%m%d%H')
         echo "video_number=$VID_NUM" >> $GITHUB_OUTPUT
-        echo "Video number: $VID_NUM"
+        echo "▶ Video number: $VID_NUM"
 
     - name: 🎬 Generate Short + Thumbnail
       env:
@@ -65,11 +76,12 @@ jobs:
         sys.path.insert(0, '.')
         from scripts.generate_short import generate
 
-        vid, thumb, facts = generate(${{ steps.vidnum.outputs.video_number }})
+        vid, thumb, facts = generate(
+            ${{ steps.vidnum.outputs.video_number }})
 
         with open('output_paths.txt', 'w') as f:
-            f.write(vid   + '\n')
-            f.write((thumb or '') + '\n')
+            f.write(vid              + '\n')
+            f.write((thumb or '')    + '\n')
 
         print(f'VIDEO : {vid}')
         print(f'THUMB : {thumb}')
@@ -89,7 +101,7 @@ jobs:
         with open('output_paths.txt') as f:
             lines      = f.read().strip().split('\n')
         vid_path   = lines[0]
-        thumb_path = lines[1] if len(lines) > 1 and lines[1] else None
+        thumb_path = lines[1] if len(lines)>1 and lines[1] else None
 
         facts_file = vid_path.replace('/short.mp4', '/facts.json')
         with open(facts_file) as f:
@@ -100,24 +112,24 @@ jobs:
         vid_id, url = upload_video(
             video_path   = vid_path,
             facts        = facts,
-            video_number = int('${{ steps.vidnum.outputs.video_number }}'),
+            video_number = int(
+                '${{ steps.vidnum.outputs.video_number }}'),
             thumb_path   = thumb_path,
         )
         print(f'✅ Uploaded: {url}')
         PYEOF
 
-    - name: 💾 Commit used_facts.json back to repo
+    - name: 💾 Commit used_facts.json + playlist_id.txt
       if: always()
       run: |
         git config user.name  "github-actions[bot]"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add used_facts.json || true
+        git config user.email \
+          "github-actions[bot]@users.noreply.github.com"
+        git add used_facts.json playlist_id.txt || true
         git diff --cached --quiet || \
-          git commit -m "🤖 Update used_facts.json [skip ci]"
+          git commit -m "🤖 Update facts store [skip ci]"
         git push || true
 
     - name: 🧹 Cleanup
       if: always()
-      run: |
-        rm -rf output/ _audio/ _images/ || true
-        echo "✅ Cleaned up"
+      run: rm -rf output/ _audio/ _images/ || true
