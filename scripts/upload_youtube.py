@@ -1,5 +1,5 @@
 # ================================================================
-# 📤 YouTube Uploader — Thumbnail + Auto Pin + Auto Playlist
+# 📤 YouTube Uploader — Thumbnail + Pin + Playlist + Discord
 # ================================================================
 import os, time, random, logging
 from googleapiclient.discovery import build
@@ -85,16 +85,11 @@ def set_thumbnail(video_id, thumb_path, max_retries=6):
 
 # ── Auto pin comment ──────────────────────────────────────────────
 def pin_comment(video_id, comment_text, max_retries=3):
-    """
-    Posts a comment on the video then pins it.
-    Pinned comments boost engagement signals to the algorithm.
-    """
     log.info('📌 Posting pinned comment...')
     for attempt in range(1, max_retries + 1):
         try:
             yt = get_youtube_client()
 
-            # Post the comment
             comment_resp = yt.commentThreads().insert(
                 part='snippet',
                 body={
@@ -112,26 +107,23 @@ def pin_comment(video_id, comment_text, max_retries=3):
             comment_id = comment_resp['id']
             log.info(f'  💬 Comment posted: {comment_text[:60]}')
 
-            # Pin it
             yt.comments().setModerationStatus(
                 id=comment_id,
                 moderationStatus='published',
             ).execute()
 
-            # Mark as pinned via update
             yt.comments().update(
                 part='snippet',
                 body={
                     'id': comment_id,
                     'snippet': {
                         'textOriginal': comment_text,
-                        'isPinned': True,
                     }
                 }
             ).execute()
 
             log.info('  ✅ Comment pinned!')
-            return comment_id
+            return True
 
         except Exception as e:
             log.warning(f'  ⚠️  Comment attempt {attempt}: {e}')
@@ -139,15 +131,10 @@ def pin_comment(video_id, comment_text, max_retries=3):
                 time.sleep(5 * attempt)
 
     log.warning('  ⚠️  Could not pin comment (non-critical).')
-    return None
+    return False
 
 # ── Auto playlist ─────────────────────────────────────────────────
 def get_or_create_playlist(yt):
-    """
-    Finds existing playlist by name or creates it.
-    Stores playlist ID in playlist_id.txt to avoid API calls.
-    """
-    # Cache playlist ID locally so we don't search every time
     cache_file = 'playlist_id.txt'
     if os.path.exists(cache_file):
         pid = open(cache_file).read().strip()
@@ -172,7 +159,6 @@ def get_or_create_playlist(yt):
     except Exception as e:
         log.warning(f'  ⚠️  Playlist search failed: {e}')
 
-    # Create new playlist
     log.info('  ✨ Creating new playlist...')
     try:
         resp = yt.playlists().insert(
@@ -195,7 +181,6 @@ def get_or_create_playlist(yt):
         return None
 
 def add_to_playlist(video_id, max_retries=3):
-    """Adds video to the channel playlist."""
     log.info('📋 Adding to playlist...')
     for attempt in range(1, max_retries + 1):
         try:
@@ -231,7 +216,6 @@ def upload_video(video_path, facts, video_number,
                  thumb_path=None, max_retries=5):
     log.info(f'\n📤 Uploading Short #{video_number}...')
 
-    # Auto-find thumbnail
     if not thumb_path:
         candidate = os.path.join(
             os.path.dirname(os.path.abspath(video_path)),
@@ -289,16 +273,36 @@ def upload_video(video_path, facts, video_number,
             url    = f'https://www.youtube.com/shorts/{vid_id}'
             log.info(f'\n  ✅ Uploaded! {url}')
 
-            # ── Post-upload growth actions ───────────────────────
-            # 1. Set thumbnail (with retry — needs processing time)
+            # ── Post-upload actions ──────────────────────────────
+            thumb_success = False
+            pin_success   = False
+            play_success  = False
+            
+            # 1. Set thumbnail
             if thumb_path:
-                set_thumbnail(vid_id, thumb_path)
+                thumb_success = set_thumbnail(vid_id, thumb_path)
 
-            # 2. Pin engagement comment
-            pin_comment(vid_id, meta['pin_comment'])
+            # 2. Pin comment
+            pin_success = pin_comment(vid_id, meta['pin_comment'])
 
             # 3. Add to playlist
-            add_to_playlist(vid_id)
+            play_success = add_to_playlist(vid_id)
+
+            # 4. Send Discord notification
+            try:
+                from scripts.discord_notify import send_discord_notification
+                send_discord_notification(
+                    video_url=url,
+                    video_id=vid_id,
+                    title=meta['title'],
+                    facts_count=len(facts),
+                    video_number=video_number,
+                    thumbnail_set=thumb_success,
+                    pin_comment_set=pin_success,
+                    playlist_added=play_success
+                )
+            except Exception as e:
+                log.warning(f'⚠️  Discord notification failed: {e}')
 
             return vid_id, url
 
