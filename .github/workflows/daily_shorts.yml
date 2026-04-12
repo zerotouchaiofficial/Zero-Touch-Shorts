@@ -4,15 +4,15 @@ on:
   schedule:
     # ── 10 uploads/day at PEAK YouTube times (EST = UTC-5) ────────
     # 12:00 PM EST = 17:00 UTC  ← lunch peak
-    #- cron: '0 17 * * *'
+    - cron: '0 17 * * *'
     # 1:00 PM EST = 18:00 UTC
-    #- cron: '0 18 * * *'
+    - cron: '0 18 * * *'
     # 3:00 PM EST = 20:00 UTC  ← afternoon peak
-    #- cron: '0 20 * * *'
+    - cron: '0 20 * * *'
     # 5:00 PM EST = 22:00 UTC
-    #- cron: '0 22 * * *'
+    - cron: '0 22 * * *'
     # 6:00 PM EST = 23:00 UTC  ← commute peak
-    #- cron: '0 23 * * *'
+    - cron: '0 23 * * *'
     # 7:00 PM EST = 00:00 UTC
     - cron: '0 0 * * *'
     # 8:00 PM EST = 01:00 UTC  ← prime time peak
@@ -67,58 +67,124 @@ jobs:
         echo "video_number=$VID_NUM" >> $GITHUB_OUTPUT
         echo "▶ Video number: $VID_NUM"
 
+    # ── GENERATION PHASE ──────────────────────────────────────────
     - name: 🎬 Generate Short + Thumbnail
+      id: generate
       env:
         UNSPLASH_KEY: ${{ secrets.UNSPLASH_KEY }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: |
         python - <<'PYEOF'
-        import sys, json
+        import sys, json, os
         sys.path.insert(0, '.')
-        from scripts.generate_short import generate
-
-        vid, thumb, facts = generate(
-            ${{ steps.vidnum.outputs.video_number }})
-
-        with open('output_paths.txt', 'w') as f:
-            f.write(vid              + '\n')
-            f.write((thumb or '')    + '\n')
-
-        print(f'VIDEO : {vid}')
-        print(f'THUMB : {thumb}')
-        print(f'FACTS : {len(facts)}')
+        
+        video_number = int('${{ steps.vidnum.outputs.video_number }}')
+        
+        try:
+            # Optional: Notify generation start
+            try:
+                from scripts.discord_notify import send_generation_start
+                send_generation_start(video_number)
+            except:
+                pass
+            
+            from scripts.generate_short import generate
+            
+            vid, thumb, facts = generate(video_number)
+            
+            with open('output_paths.txt', 'w') as f:
+                f.write(vid              + '\n')
+                f.write((thumb or '')    + '\n')
+            
+            print(f'✅ VIDEO : {vid}')
+            print(f'✅ THUMB : {thumb}')
+            print(f'✅ FACTS : {len(facts)}')
+            
+        except Exception as e:
+            print(f'❌ Generation failed: {e}')
+            
+            # Send error to Discord
+            try:
+                from scripts.discord_notify import send_error_notification
+                send_error_notification(
+                    error_message=str(e),
+                    video_number=video_number,
+                    stage='Video Generation'
+                )
+            except:
+                pass
+            
+            raise  # Re-raise so workflow fails
         PYEOF
 
+    # ── UPLOAD PHASE ──────────────────────────────────────────────
     - name: 📤 Upload to YouTube
+      id: upload
       env:
         YT_CLIENT_ID:     ${{ secrets.YT_CLIENT_ID }}
         YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
         YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
       run: |
         python - <<'PYEOF'
         import sys, os, json
         sys.path.insert(0, '.')
-
-        with open('output_paths.txt') as f:
-            lines      = f.read().strip().split('\n')
-        vid_path   = lines[0]
-        thumb_path = lines[1] if len(lines)>1 and lines[1] else None
-
-        facts_file = vid_path.replace('/short.mp4', '/facts.json')
-        with open(facts_file) as f:
-            facts = json.load(f)
-
-        from scripts.upload_youtube import upload_video
-
-        vid_id, url = upload_video(
-            video_path   = vid_path,
-            facts        = facts,
-            video_number = int(
-                '${{ steps.vidnum.outputs.video_number }}'),
-            thumb_path   = thumb_path,
-        )
-        print(f'✅ Uploaded: {url}')
+        
+        video_number = int('${{ steps.vidnum.outputs.video_number }}')
+        
+        try:
+            with open('output_paths.txt') as f:
+                lines      = f.read().strip().split('\n')
+            vid_path   = lines[0]
+            thumb_path = lines[1] if len(lines)>1 and lines[1] else None
+            
+            facts_file = vid_path.replace('/short.mp4', '/facts.json')
+            with open(facts_file) as f:
+                facts = json.load(f)
+            
+            from scripts.upload_youtube import upload_video
+            
+            vid_id, url = upload_video(
+                video_path   = vid_path,
+                facts        = facts,
+                video_number = video_number,
+                thumb_path   = thumb_path,
+            )
+            print(f'✅ Uploaded: {url}')
+            
+        except Exception as e:
+            print(f'❌ Upload failed: {e}')
+            
+            # Determine which stage failed
+            error_str = str(e).lower()
+            if 'invalid_grant' in error_str or 'invalid_client' in error_str:
+                stage = 'YouTube Authentication'
+            elif 'quota' in error_str:
+                stage = 'YouTube API Quota'
+            elif 'thumbnail' in error_str:
+                stage = 'Thumbnail Upload'
+            elif 'comment' in error_str:
+                stage = 'Pin Comment'
+            elif 'playlist' in error_str:
+                stage = 'Add to Playlist'
+            else:
+                stage = 'YouTube Upload'
+            
+            # Send error to Discord
+            try:
+                from scripts.discord_notify import send_error_notification
+                send_error_notification(
+                    error_message=str(e),
+                    video_number=video_number,
+                    stage=stage
+                )
+            except:
+                pass
+            
+            raise  # Re-raise so workflow fails
         PYEOF
 
+    # ── CLEANUP & PERSIST ─────────────────────────────────────────
     - name: 💾 Commit used_facts.json + playlist_id.txt
       if: always()
       run: |
